@@ -25,22 +25,22 @@ if is_ipython:
 plt.ion()
 
 # Determine whether to use a GPU if available
-# TODO install cudo
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Define a named tuple to hold experience tuples
 Transition = namedtuple("Transition", ("state", "action", "next_state", "reward"))
+
 
 # Buffer of examples we can learn over
 class ReplayMemory(object):
     # Initialize the replay memory with a fixed capacity
     def __init__(self, capacity):
         self.memory = deque([], maxlen=capacity)
-    
+
     # Function to save a transition to memory
     def push(self, *args):
         self.memory.append(Transition(*args))
-    
+
     # Function to sample a batch of transitions from memory
     def sample(self, batch_size):
         return random.sample(self.memory, batch_size)
@@ -48,6 +48,7 @@ class ReplayMemory(object):
     # Function to get the current size of the memory
     def __len__(self):
         return len(self.memory)
+
 
 # Define the neural network architecture for DQN
 class DQN(nn.Module):
@@ -59,25 +60,24 @@ class DQN(nn.Module):
         self.layer2 = nn.Linear(128, 128)
         self.layer3 = nn.Linear(128, outputs)
         # TODO: Experiment with number of layers and neurons per layer
-        
 
     # Define forward pass
     def forward(self, x):
         # TODO: Implement the forward pass
         # TODO: Experiment with different activation functions
-        x = torch_functional.relu(self.layer1)
-        x = torch_functional.relu(self.layer2)
+        x = torch_functional.relu(self.layer1(x))
+        x = torch_functional.relu(self.layer2(x))
         return self.layer3(x)
-        
+
 
 # Hyperparameters (TODO: Define appropriate values)
-BATCH_SIZE = 128 # Batch size between 100 and 200
-GAMMA = 0.99 # Discount factor between 0.9 and 0.99
-EPS_START = 0.9 # Starting value of epsilon
-EPS_END = 0.01 # Minimum value of epsilon
-EPS_DECAY = 1000 # Rate of decay for epsilon (500 to 1500)
-TAU = 0.005 # Target network update rate
-LR = 1e-4 # Learning rate
+BATCH_SIZE = 128  # Batch size between 100 and 200
+GAMMA = 0.99  # Discount factor between 0.9 and 0.99
+EPS_START = 0.9  # Starting value of epsilon
+EPS_END = 0.01  # Minimum value of epsilon
+EPS_DECAY = 1000  # Rate of decay for epsilon (500 to 1500)
+TAU = 0.005  # Target network update rate
+LR = 1e-4  # Learning rate
 
 # Get number of actions from gym action space
 n_actions = env.action_space.n
@@ -95,13 +95,17 @@ memory = ReplayMemory(10000)
 
 steps_done = 0
 
+
 # Define epsilon-greedy action selection function
 def select_action(state):
     global steps_done
     sample = random.random()
     # TODO: Implement epsilon-greedy action selection
-    # TODO: define epsilon threshold 
-    eps_threshold = EPS_END + (EPS_START - EPS_END) * math.exp(-1 * steps_done / EPS_DECAY)
+    # TODO: define epsilon threshold
+    eps_threshold = EPS_END + (EPS_START - EPS_END) * math.exp(
+        -1.0 * steps_done / EPS_DECAY
+    )
+    steps_done += 1
     if sample > eps_threshold:
         with torch.no_grad():
             # Greedy action
@@ -109,15 +113,20 @@ def select_action(state):
             # Find the action with the highest Q-value.
             # Extract the index of that action (since the index corresponds to the action in a discrete action space).
             # Reshapes the index into a tensor with shape (1, 1), which can be used for further processing or as an input to another function.
+            return policy_net(state).max(1)[1].view(1, 1)
     else:
         # Random action
         # Creates a new PyTorch tensor.
         # Generate a nested list with a single element, which is a random sample from the environment's action space.
         # Place the tensor on the specified device (CPU or GPU).
         # Set the data type of the tensor to a 64-bit integer.
-    
+        return torch.tensor(
+            [[env.action_space.sample()]], device=device, dtype=torch.long
+        )
+
 
 episode_durations = []
+
 
 # Define function to plot episode durations
 def plot_durations(show_result=False):
@@ -145,9 +154,13 @@ def plot_durations(show_result=False):
         else:
             display.display(plt.gcf())
 
+
 def optimize_model():
     # TODO: Implement optimization step
     # If length of memory is less than batch size, return
+    if len(memory) < BATCH_SIZE:
+        return
+    transitions = memory.sample(BATCH_SIZE)
     # Convert batch-array of Transitions to Transition of batch-arrays.
     batch = Transition(*zip(*transitions))
     # Compute a mask of non-final states and concatenate the batch elements
@@ -159,16 +172,21 @@ def optimize_model():
     # Create a list comprehension that filters out None values from batch.next_state.
     # Concatenates the remaining tensors in the list into a single tensor. # torch.cat method
     # The resulting tensor non_final_next_states contains all the next state tensors for non-terminal states in the batch.
+    non_final_next_states = torch.cat([s for s in batch.next_state if s is not None])
     # Concatenates tensors from batch.state into a single tensor.
     # The resulting tensor state_batch contains all state tensors in the batch.
+    state_batch = torch.cat(batch.state)
     # Concatenates tensors from batch.action into a single tensor.
     # The resulting tensor action_batch contains all action tensors in the batch.
+    action_batch = torch.cat(batch.action)
     # Concatenates tensors from batch.reward into a single tensor.
     # The resulting tensor reward_batch contains all reward tensors in the batch.
+    reward_batch = torch.cat(batch.reward)
 
     # Pass the state_batch tensor through the policy_net neural network to get Q-values for all actions.
     # Gather specific Q-values from the result tensor. The 1 indicates that we're selecting values along the action dimension (for each state in the batch).
     # The resulting tensor holding the Q-values corresponding to the actions that were actually taken in each state.
+    q_values = policy_net(state_batch).gather(1, action_batch)
 
     # Initialize a tensor for the next state values with zeros for all batch entries.
     next_state_values = torch.zeros(BATCH_SIZE, device=device)
@@ -177,18 +195,21 @@ def optimize_model():
     # from the target network, ensuring final states remain zero.
     with torch.no_grad():
         next_state_values[non_final_mask] = target_net(non_final_next_states).max(1)[0]
-    
+
     # Compute the expected Q values
-
+    expected_q_values = (next_state_values * GAMMA) + reward_batch
     # Compute Huber loss, SmoothL1Loss
-
+    criterion = nn.SmoothL1Loss()
+    loss = criterion(q_values, expected_q_values.unsqueeze(1))
     # Optimize the model
-    # optimizer.zero_grad()
+    optimizer.zero_grad()
     # torch optimizer backward()
-
+    loss.backward()
     # In-place gradient clipping so its not too big or small, helps avoid massive updates to weights
-
+    torch.nn.utils.clip_grad_value_(policy_net.parameters(), 100)
     # Lastly call the optimizer step
+    optimizer.step()
+
 
 def main():
     if torch.cuda.is_available():
@@ -240,3 +261,7 @@ def main():
     plot_durations(show_result=True)
     plt.ioff()
     plt.show()
+
+
+if __name__ == "__main__":
+    main()
